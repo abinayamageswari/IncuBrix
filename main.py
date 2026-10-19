@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+
 # Project folders
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -27,14 +28,15 @@ AUDIO_FILE = UPLOAD_DIR / "narration.wav"
 AUDIO_GENERATOR = BASE_DIR / "generate_audio.py"
 VIDEO_RENDERER = BASE_DIR / "render_video.py"
 
-# Create the FastAPI application
+
+# Create FastAPI application
 app = FastAPI(
     title="IncuBrix B-roll Video Engine",
     description="Generate narrated videos with captions and different aspect ratios.",
     version="1.0.0"
 )
 
-# Serve static files if the folder exists
+# Serve the frontend
 if STATIC_DIR.exists():
     app.mount(
         "/static",
@@ -66,6 +68,7 @@ def process_job(job_id: str, request_data: dict):
         jobs[job_id]["status"] = "processing"
         jobs[job_id]["message"] = "Generating narration..."
 
+        # Save the script and selected aspect ratio
         SCRIPT_FILE.write_text(
             request_data["script"],
             encoding="utf-8"
@@ -76,7 +79,7 @@ def process_job(job_id: str, request_data: dict):
             encoding="utf-8"
         )
 
-        # Generate narration
+        # Generate narration audio
         audio_result = subprocess.run(
             [
                 sys.executable,
@@ -93,7 +96,7 @@ def process_job(job_id: str, request_data: dict):
             raise RuntimeError(
                 audio_result.stderr
                 or audio_result.stdout
-                or "Audio generation failed"
+                or "Audio generation failed."
             )
 
         if not AUDIO_FILE.exists():
@@ -103,11 +106,17 @@ def process_job(job_id: str, request_data: dict):
 
         jobs[job_id]["message"] = "Rendering video..."
 
-        # Render the video
+        # Determine output path before rendering
+        output_file = get_output_path(ratio)
+
+        # Render video with all required arguments
         video_result = subprocess.run(
             [
                 sys.executable,
-                str(VIDEO_RENDERER)
+                str(VIDEO_RENDERER),
+                str(AUDIO_FILE),
+                str(output_file),
+                ratio
             ],
             cwd=str(BASE_DIR),
             capture_output=True,
@@ -119,16 +128,15 @@ def process_job(job_id: str, request_data: dict):
             raise RuntimeError(
                 video_result.stderr
                 or video_result.stdout
-                or "Video rendering failed"
+                or "Video rendering failed."
             )
 
-        output_file = get_output_path(ratio)
-
-        if not output_file.exists():
+        if not output_file.exists() or output_file.stat().st_size == 0:
             raise FileNotFoundError(
-                f"Expected video was not created: {output_file}"
+                f"Expected video was not created correctly: {output_file}"
             )
 
+        # Mark job as successful
         jobs[job_id]["status"] = "succeeded"
         jobs[job_id]["message"] = "Video created successfully."
         jobs[job_id]["output_file"] = str(output_file)
@@ -146,7 +154,7 @@ def process_job(job_id: str, request_data: dict):
         jobs[job_id]["output_url"] = None
 
 
-# Homepage: display your HTML interface
+# Homepage
 @app.get("/")
 def home():
     index_file = STATIC_DIR / "index.html"
@@ -160,7 +168,7 @@ def home():
     return FileResponse(str(index_file))
 
 
-# Create a video job
+# Create a video generation job
 @app.post("/api/v1/broll/jobs", status_code=202)
 def create_video_job(
     request: VideoRequest,
@@ -243,7 +251,7 @@ def get_video_job(job_id: str):
     return jobs[job_id]
 
 
-# Preview a generated video in the browser
+# Preview generated video
 @app.get("/api/v1/broll/jobs/{job_id}/preview")
 def preview_video(job_id: str):
     if job_id not in jobs:
@@ -274,7 +282,7 @@ def preview_video(job_id: str):
     )
 
 
-# Download a generated video
+# Download generated video
 @app.get("/api/v1/broll/jobs/{job_id}/download")
 def download_video(job_id: str):
     if job_id not in jobs:
