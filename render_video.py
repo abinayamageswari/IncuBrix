@@ -1,246 +1,222 @@
-import subprocess
-import re
+
+import os
 import sys
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 
-# Project folders
 BASE_DIR = Path(__file__).resolve().parent
 CLIPS_DIR = BASE_DIR / "clips"
-UPLOADS_DIR = BASE_DIR / "uploads"
-
-# Use the output folder provided by main.py.
-# If run manually, default to the original outputs folder.
-DEFAULT_OUTPUT_DIR = BASE_DIR / "outputs"
-
-OUTPUT_DIR = (
-    Path(sys.argv[1]).resolve()
-    if len(sys.argv) > 1
-    else DEFAULT_OUTPUT_DIR
-)
-
-AUDIO_FILE = UPLOADS_DIR / "narration.wav"
-SCRIPT_FILE = UPLOADS_DIR / "current_script.txt"
-RATIO_FILE = UPLOADS_DIR / "current_aspect_ratio.txt"
-
-FFMPEG = r"D:\ffmpeg\bin\ffmpeg.exe"
-FFPROBE = r"D:\ffmpeg\bin\ffprobe.exe"
+OUTPUT_DIR = BASE_DIR / "outputs"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# Read script and aspect ratio
-script = SCRIPT_FILE.read_text(encoding="utf-8").strip()
+def find_executable(name, windows_path):
+    """Find FFmpeg tools on Windows or Linux."""
+    executable = shutil.which(name)
 
-ratio = (
-    RATIO_FILE.read_text(encoding="utf-8").strip()
-    if RATIO_FILE.exists()
-    else "16:9"
-)
+    if executable:
+        return executable
 
-dimensions = {
-    "16:9": (1920, 1080),
-    "9:16": (1080, 1920),
-    "1:1": (1080, 1080)
-}
+    if os.name == "nt" and Path(windows_path).exists():
+        return windows_path
 
-if ratio not in dimensions:
-    raise ValueError(
-        "Aspect ratio must be 16:9, 9:16, or 1:1"
+    raise FileNotFoundError(
+        f"{name} was not found. Please install FFmpeg and ensure it is available."
     )
 
-width, height = dimensions[ratio]
+
+FFMPEG = find_executable(
+    "ffmpeg",
+    r"D:\ffmpeg\bin\ffmpeg.exe"
+)
+
+FFPROBE = find_executable(
+    "ffprobe",
+    r"D:\ffmpeg\bin\ffprobe.exe"
+)
 
 
-# Split script into sentences
-sentences = [
-    sentence.strip()
-    for sentence in re.split(r"(?<=[.!?])\s+", script)
-    if sentence.strip()
-]
+def get_duration(video_path):
+    """Get video duration in seconds."""
+    result = subprocess.run(
+        [
+            FFPROBE,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
-if not sentences:
-    sentences = [script]
+    return float(result.stdout.strip())
 
 
-# Select B-roll for each sentence
-def select_clip(sentence):
-    text = sentence.lower()
+def run_command(command):
+    """Run a command and report errors clearly."""
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
 
-    city_words = [
-        "city", "urban", "street", "traffic",
-        "building", "buildings", "skyline"
-    ]
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Video processing failed:\n"
+            + result.stderr[-4000:]
+        )
 
-    mountain_words = [
-        "mountain", "mountains", "hill", "hills",
-        "peak", "peaks", "hiking", "snow"
-    ]
+    return result
 
-    nature_words = [
-        "nature", "forest", "forests", "tree", "trees",
-        "wildlife", "river", "lake", "flower", "flowers",
-        "bird", "birds", "garden"
-    ]
 
-    if any(word in text for word in city_words):
-        filename = "city_small.mp4"
-    elif any(word in text for word in mountain_words):
-        filename = "mountains_small.mp4"
-    elif any(word in text for word in nature_words):
-        filename = "nature_small.mp4"
+def render_video(audio_path, output_path, aspect_ratio="16:9"):
+    """
+    Combine generated audio with available B-roll clips.
+
+    audio_path: path to the generated voiceover audio.
+    output_path: destination for the rendered MP4.
+    aspect_ratio: '16:9' or '9:16'.
+    """
+    audio_path = Path(audio_path)
+    output_path = Path(output_path)
+
+    if not audio_path.is_absolute():
+        audio_path = BASE_DIR / audio_path
+
+    if not output_path.is_absolute():
+        output_path = BASE_DIR / output_path
+
+    if not audio_path.exists():
+        raise FileNotFoundError(
+            f"Audio file not found: {audio_path}"
+        )
+
+    if aspect_ratio == "9:16":
+        width, height = 720, 1280
     else:
-        filename = "nature_small.mp4"
+        width, height = 1280, 720
 
-    path = CLIPS_DIR / filename
+    extensions = {".mp4", ".mov", ".mkv", ".webm"}
 
-    if not path.exists():
+    clips = sorted(
+        file for file in CLIPS_DIR.iterdir()
+        if file.is_file() and file.suffix.lower() in extensions
+    ) if CLIPS_DIR.exists() else []
+
+    if not clips:
         raise FileNotFoundError(
-            f"Required B-roll clip not found: {path}"
+            f"No video clips found in {CLIPS_DIR}. "
+            "Add B-roll videos to the clips folder."
         )
 
-    return path
+    audio_duration = get_duration(audio_path)
 
+    if audio_duration <= 0:
+        raise ValueError("The generated audio has no valid duration.")
 
-# Check required files
-for file_path in [AUDIO_FILE, SCRIPT_FILE]:
-    if not file_path.exists():
-        raise FileNotFoundError(
-            f"Missing file: {file_path}"
+    # Use the available clips repeatedly until the voiceover ends.
+    segment_duration = audio_duration / len(clips)
+
+    filter_parts = []
+    input_args = []
+
+    for clip in clips:
+        input_args.extend(["-i", str(clip)])
+
+    input_args.extend(["-i", str(audio_path)])
+    audio_index = len(clips)
+
+    for index, clip in enumerate(clips):
+        filter_parts.append(
+            f"[{index}:v]"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},"
+            f"setsar=1,"
+            f"fps=30,"
+            f"trim=duration={segment_duration},"
+            f"setpts=PTS-STARTPTS"
+            f"[v{index}]"
         )
 
-
-# Get narration duration
-result = subprocess.run(
-    [
-        FFPROBE,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(AUDIO_FILE)
-    ],
-    capture_output=True,
-    text=True,
-    check=True
-)
-
-duration = float(result.stdout.strip())
-
-if duration <= 0:
-    raise ValueError("Narration duration must be positive")
-
-
-# Estimate sentence durations using character length.
-# This is an estimate, not exact speech recognition.
-weights = [
-    max(len(sentence), 1)
-    for sentence in sentences
-]
-
-total_weight = sum(weights)
-
-durations = [
-    duration * weight / total_weight
-    for weight in weights
-]
-
-
-# Create temporary video segments inside this job's folder
-temp_dir = OUTPUT_DIR / "segments"
-temp_dir.mkdir(parents=True, exist_ok=True)
-
-segment_files = []
-
-for index, (sentence, segment_duration) in enumerate(
-    zip(sentences, durations)
-):
-    clip = select_clip(sentence)
-
-    segment_file = temp_dir / f"segment_{index:03d}.mp4"
-
-    # Escape caption text for FFmpeg
-    caption = (
-        sentence.replace("\\", "\\\\")
-        .replace(":", "\\:")
-        .replace("'", "\\'")
-        .replace("%", "\\%")
-        .replace(",", "\\,")
-        .replace("[", "\\[")
-        .replace("]", "\\]")
+    video_inputs = "".join(
+        f"[v{index}]" for index in range(len(clips))
     )
 
-    video_filter = (
-        f"scale={width}:{height}:"
-        "force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-        "fps=30,"
-        "drawtext="
-        f"text='{caption}':"
-        "fontcolor=white:fontsize=32:"
-        "borderw=2:bordercolor=black:"
-        "x=(w-text_w)/2:y=h-text_h-60,"
-        "format=yuv420p"
+    filter_parts.append(
+        f"{video_inputs}"
+        f"concat=n={len(clips)}:v=1:a=0,"
+        f"trim=duration={audio_duration},"
+        f"setpts=PTS-STARTPTS"
+        f"[video]"
     )
+
+    filter_parts.append(
+        f"[{audio_index}:a]"
+        f"atrim=duration={audio_duration},"
+        f"asetpts=PTS-STARTPTS"
+        f"[audio]"
+    )
+
+    filter_complex = ";".join(filter_parts)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     command = [
-        FFMPEG, "-y",
-        "-stream_loop", "-1",
-        "-i", str(clip),
-        "-t", f"{segment_duration:.3f}",
-        "-vf", video_filter,
-        "-an",
+        FFMPEG,
+        "-y",
+        *input_args,
+        "-filter_complex", filter_complex,
+        "-map", "[video]",
+        "-map", "[audio]",
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-pix_fmt", "yuv420p",
-        str(segment_file)
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(output_path),
     ]
 
-    subprocess.run(command, check=True)
+    run_command(command)
 
-    segment_files.append(segment_file)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError("The output video was not created correctly.")
 
-    print(
-        f"Sentence {index + 1}: {sentence}\n"
-        f"Selected B-roll: {clip.name}\n"
-        f"Estimated duration: {segment_duration:.2f}s"
-    )
+    return output_path
 
 
-# Create FFmpeg concat list
-concat_file = temp_dir / "concat_list.txt"
+def main():
+    """Support command-line execution."""
+    if len(sys.argv) < 3:
+        print(
+            "Usage: python render_video.py "
+            "<audio_path> <output_path> [16:9|9:16]"
+        )
+        sys.exit(1)
 
-with concat_file.open("w", encoding="utf-8") as file:
-    for segment in segment_files:
-        safe_path = segment.as_posix().replace("'", "'\\''")
-        file.write(f"file '{safe_path}'\n")
+    audio_path = sys.argv[1]
+    output_path = sys.argv[2]
+    aspect_ratio = sys.argv[3] if len(sys.argv) > 3 else "16:9"
+
+    try:
+        result = render_video(
+            audio_path,
+            output_path,
+            aspect_ratio,
+        )
+        print(f"Video created successfully: {result}")
+
+    except Exception as error:
+        print(f"Video generation failed: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
-# Save final video inside this job's output folder
-output_file = OUTPUT_DIR / (
-    f"final_video_{ratio.replace(':', 'x')}.mp4"
-)
-
-
-# Join video segments and add the original narration
-command = [
-    FFMPEG, "-y",
-    "-f", "concat",
-    "-safe", "0",
-    "-i", str(concat_file),
-    "-i", str(AUDIO_FILE),
-    "-map", "0:v:0",
-    "-map", "1:a:0",
-    "-c:v", "libx264",
-    "-preset", "ultrafast",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-t", str(duration),
-    "-movflags", "+faststart",
-    str(output_file)
-]
-
-subprocess.run(command, check=True)
-
-print("\nVideo generation complete!")
-print(f"Aspect ratio: {ratio}")
-print(f"Output video: {output_file}")
+if __name__ == "__main__":
+    main()
