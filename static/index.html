@@ -1,0 +1,403 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IncuBrix | B-roll Video Engine</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0b1020;
+            color: #f1f5f9;
+        }
+
+        header {
+            padding: 22px 8%;
+            background: #11182b;
+            border-bottom: 1px solid #28334b;
+        }
+
+        header h2 {
+            margin: 0;
+            color: #8b9cff;
+        }
+
+        header p {
+            color: #a8b3c7;
+            margin-bottom: 0;
+        }
+
+        main {
+            max-width: 1100px;
+            margin: 35px auto;
+            padding: 0 20px;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 22px;
+        }
+
+        .card {
+            background: #141d32;
+            border: 1px solid #293650;
+            border-radius: 14px;
+            padding: 25px;
+            margin-bottom: 22px;
+        }
+
+        h3 {
+            margin-top: 0;
+        }
+
+        label {
+            display: block;
+            margin: 18px 0 8px;
+            color: #d8e0f0;
+        }
+
+        textarea, select {
+            width: 100%;
+            padding: 13px;
+            border-radius: 8px;
+            border: 1px solid #394863;
+            background: #0b1223;
+            color: white;
+            font-size: 15px;
+        }
+
+        textarea {
+            min-height: 180px;
+            resize: vertical;
+        }
+
+        button {
+            width: 100%;
+            margin-top: 20px;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            background: #7789ff;
+            color: #080d1b;
+            font-weight: bold;
+            font-size: 15px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #9ba8ff;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: wait;
+        }
+
+        .muted {
+            color: #a8b3c7;
+            font-size: 13px;
+        }
+
+        #status {
+            margin-top: 18px;
+            padding: 12px;
+            background: #0b1223;
+            border-radius: 8px;
+            overflow-wrap: anywhere;
+        }
+
+        video {
+            width: 100%;
+            margin-top: 15px;
+            border-radius: 10px;
+            background: black;
+        }
+
+        a {
+            color: #a5b4fc;
+        }
+
+        .history-item {
+            padding: 12px 0;
+            border-bottom: 1px solid #293650;
+            overflow-wrap: anywhere;
+        }
+
+        footer {
+            text-align: center;
+            padding: 25px;
+            color: #8b98ad;
+        }
+
+        @media (max-width: 750px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            header {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h2>✦ IncuBrix</h2>
+        <p>Script & Voiceover to B-roll Video Engine</p>
+    </header>
+
+    <main>
+        <div class="layout">
+            <section class="card">
+                <h3>Create your video</h3>
+                <p class="muted">
+                    Enter a script and generate a narrated video with captions
+                    and background footage.
+                </p>
+
+                <label for="script">Your script</label>
+                <textarea id="script"
+                    placeholder="Enter your narration script here..."></textarea>
+
+                <p class="muted"><span id="count">0</span> characters</p>
+
+                <label for="ratio">Video aspect ratio</label>
+                <select id="ratio">
+                    <option value="16:9">16:9 — YouTube / Landscape</option>
+                    <option value="9:16">9:16 — Reels / Shorts</option>
+                    <option value="1:1">1:1 — Square video</option>
+                </select>
+
+                <label for="style">Video style</label>
+                <select id="style">
+                    <option value="cinematic">Cinematic</option>
+                    <option value="nature">Nature</option>
+                    <option value="urban">Urban</option>
+                </select>
+
+                <button id="generate">Generate video</button>
+
+                <div id="status">Ready to create your video.</div>
+            </section>
+
+            <section class="card">
+                <h3>Video preview</h3>
+                <p class="muted">
+                    Your generated video will appear here when it is ready.
+                </p>
+
+                <video id="preview" controls playsinline hidden></video>
+
+                <p id="download-area"></p>
+            </section>
+        </div>
+
+        <section class="card">
+            <h3>Recent jobs</h3>
+            <button id="refresh" type="button">Refresh job history</button>
+            <div id="history" class="muted">Loading jobs...</div>
+        </section>
+    </main>
+
+    <footer>IncuBrix · Script and Voiceover to B-roll Video Engine</footer>
+
+    <script>
+        const scriptInput = document.getElementById("script");
+        const ratioInput = document.getElementById("ratio");
+        const styleInput = document.getElementById("style");
+        const generateButton = document.getElementById("generate");
+        const statusBox = document.getElementById("status");
+        const preview = document.getElementById("preview");
+        const downloadArea = document.getElementById("download-area");
+        const historyBox = document.getElementById("history");
+
+        let currentJobId = null;
+        let pollTimer = null;
+
+        scriptInput.addEventListener("input", () => {
+            document.getElementById("count").textContent =
+                scriptInput.value.length;
+        });
+
+        function showStatus(message) {
+            statusBox.textContent = message;
+        }
+
+        async function createVideo() {
+            const script = scriptInput.value.trim();
+
+            if (!script) {
+                showStatus("Please enter a script first.");
+                scriptInput.focus();
+                return;
+            }
+
+            generateButton.disabled = true;
+            preview.hidden = true;
+            downloadArea.replaceChildren();
+            showStatus("Submitting your video job...");
+
+            try {
+                const response = await fetch("/api/v1/broll/jobs", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        script: script,
+                        aspect_ratios: [ratioInput.value]
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.detail || "Could not create job.");
+                }
+
+                currentJobId = data.job_id || data.id;
+
+                if (!currentJobId) {
+                    throw new Error(
+                        "The API did not return a job ID. Check /docs."
+                    );
+                }
+
+                showStatus("Job created: " + currentJobId +
+                    ". Generating audio and video...");
+
+                await loadHistory();
+
+                clearInterval(pollTimer);
+                await checkJob();
+                pollTimer = setInterval(checkJob, 3000);
+
+            } catch (error) {
+                showStatus("Error: " + error.message);
+                generateButton.disabled = false;
+            }
+        }
+
+        async function checkJob() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch(
+                    "/api/v1/broll/jobs/" +
+                    encodeURIComponent(currentJobId)
+                );
+
+                const job = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(job.detail || "Could not check job.");
+                }
+
+                const state = job.status || "processing";
+                showStatus("Job " + currentJobId + ": " + state +
+                    (job.message ? " — " + job.message : ""));
+
+                if (state === "completed" || state === "complete" ||
+                    state === "success" || state === "succeeded") {
+
+                    clearInterval(pollTimer);
+                    generateButton.disabled = false;
+                    showStatus("Video generation completed!");
+
+                    preview.src = "/api/v1/broll/jobs/" +
+                        encodeURIComponent(currentJobId) + "/preview";
+                    preview.hidden = false;
+
+                    const link = document.createElement("a");
+                    link.href = "/api/v1/broll/jobs/" +
+                        encodeURIComponent(currentJobId) + "/download";
+                    link.textContent = "Download your video";
+                    link.download = "";
+                    downloadArea.replaceChildren(link);
+
+                    await loadHistory();
+
+                } else if (state === "failed" || state === "error") {
+                    clearInterval(pollTimer);
+                    generateButton.disabled = false;
+                    showStatus("Video generation failed: " +
+                        (job.message || job.error || "Check server logs."));
+                    await loadHistory();
+                }
+
+            } catch (error) {
+                clearInterval(pollTimer);
+                generateButton.disabled = false;
+                showStatus("Could not check job status: " + error.message);
+            }
+        }
+
+        async function loadHistory() {
+            try {
+                const response = await fetch("/api/v1/broll/jobs");
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error("History request failed.");
+                }
+
+                const jobs = Array.isArray(data) ? data :
+                    (data.jobs || []);
+
+                historyBox.replaceChildren();
+
+                if (jobs.length === 0) {
+                    historyBox.textContent = "No jobs yet.";
+                    return;
+                }
+
+                jobs.forEach(job => {
+                    const item = document.createElement("div");
+                    item.className = "history-item";
+
+                    const title = document.createElement("strong");
+                    title.textContent = job.job_id || job.id || "Video job";
+
+                    const detail = document.createElement("div");
+                    detail.className = "muted";
+                    detail.textContent = "Status: " +
+                        (job.status || "unknown");
+
+                    item.append(title, detail);
+
+                    item.addEventListener("click", () => {
+                        const id = job.job_id || job.id;
+                        if (id) {
+                            currentJobId = id;
+                            checkJob();
+                        }
+                    });
+
+                    item.style.cursor = "pointer";
+                    historyBox.appendChild(item);
+                });
+
+            } catch (error) {
+                historyBox.textContent =
+                    "Could not load job history: " + error.message;
+            }
+        }
+
+        generateButton.addEventListener("click", createVideo);
+        document.getElementById("refresh").addEventListener(
+            "click", loadHistory
+        );
+
+        loadHistory();
+    </script>
+</body>
+</html>
